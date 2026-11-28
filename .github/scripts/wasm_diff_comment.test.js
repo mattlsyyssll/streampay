@@ -6,6 +6,7 @@ const { test } = require('node:test');
 const {
   BOT_MARKER,
   MAX_REPORT_BYTES,
+  findPullRequestCandidates,
   postWasmDiffComment,
   readReport,
   validateCommentTarget,
@@ -133,4 +134,45 @@ test('report validation rejects empty, oversized, binary and unmarked content', 
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
   }
+});
+
+test('fork runs with no pull_requests find the open pull request by head branch and SHA', async () => {
+  const calls = [];
+  const github = {
+    rest: { pulls: { list: 'pulls.list' } },
+    paginate: async (endpoint, params) => {
+      calls.push({ endpoint, params });
+      return [
+        { number: 7, head: { sha: 'a'.repeat(40) } },
+        { number: 8, head: { sha: 'b'.repeat(40) } },
+      ];
+    },
+  };
+  const forkRun = {
+    ...run,
+    pull_requests: [],
+    head_branch: 'feature/x',
+    head_repository: { full_name: 'contributor/streampay', owner: { login: 'contributor' } },
+  };
+  const found = await findPullRequestCandidates({ github, context: { repo: repository }, run: forkRun });
+  assert.deepEqual(found.map(pull => pull.number), [7]);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].endpoint, 'pulls.list');
+  assert.deepEqual(calls[0].params, {
+    owner: 'Neziahtech', repo: 'streampay', state: 'open', head: 'contributor:feature/x', per_page: 100,
+  });
+});
+
+test('runs that already list their pull request do not call the API', async () => {
+  const github = { paginate: async () => { throw new Error('should not be called'); }, rest: { pulls: {} } };
+  const found = await findPullRequestCandidates({ github, context: { repo: repository }, run });
+  assert.deepEqual(found, [{ number: 7 }]);
+});
+
+test('a fork run without head owner or branch yields no candidates', async () => {
+  const github = { paginate: async () => { throw new Error('should not be called'); }, rest: { pulls: {} } };
+  const found = await findPullRequestCandidates({
+    github, context: { repo: repository }, run: { ...run, pull_requests: [], head_branch: undefined },
+  });
+  assert.deepEqual(found, []);
 });

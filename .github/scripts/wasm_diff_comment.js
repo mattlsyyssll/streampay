@@ -50,18 +50,31 @@ function readReport(reportPath) {
   return body;
 }
 
+// GitHub leaves `workflow_run.pull_requests` empty for pull requests opened
+// from forks, and Octokit has no endpoint that lists a run's pull requests.
+// Fall back to the open pull request whose head is the run's branch and SHA;
+// validateCommentTarget still re-checks repository, head and state.
+async function findPullRequestCandidates({ github, context, run }) {
+  if (Array.isArray(run.pull_requests) && run.pull_requests.length > 0) {
+    return run.pull_requests;
+  }
+  const headOwner = run.head_repository && run.head_repository.owner && run.head_repository.owner.login;
+  if (!headOwner || !run.head_branch || !run.head_sha) {
+    return [];
+  }
+  const pulls = await github.paginate(github.rest.pulls.list, {
+    owner: context.repo.owner,
+    repo: context.repo.repo,
+    state: 'open',
+    head: `${headOwner}:${run.head_branch}`,
+    per_page: 100,
+  });
+  return pulls.filter(pull => pull.head && pull.head.sha === run.head_sha);
+}
+
 async function postWasmDiffComment({ github, context, core }) {
   const run = context.payload.workflow_run;
-  let candidates = Array.isArray(run.pull_requests) ? run.pull_requests : [];
-  if (candidates.length === 0) {
-    const response = await github.rest.actions.listPullRequestsForRun({
-      owner: context.repo.owner,
-      repo: context.repo.repo,
-      run_id: run.id,
-      per_page: 100,
-    });
-    candidates = response.data;
-  }
+  const candidates = await findPullRequestCandidates({ github, context, run });
   if (candidates.length !== 1) {
     core.warning(`Expected one pull request for workflow run ${run.id}, found ${candidates.length}; skipping comment.`);
     return;
@@ -113,6 +126,7 @@ async function postWasmDiffComment({ github, context, core }) {
 module.exports = {
   BOT_MARKER,
   MAX_REPORT_BYTES,
+  findPullRequestCandidates,
   postWasmDiffComment,
   readReport,
   validateCommentTarget,
